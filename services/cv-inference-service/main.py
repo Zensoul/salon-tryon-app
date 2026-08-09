@@ -70,6 +70,48 @@ def classify_face_shape(landmarks, image_width: int, image_height: int) -> str:
         return "diamond"
 
 
+def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) -> dict:
+    """
+    Samples actual pixel colors from forehead and cheek regions (using
+    real landmark positions) and estimates undertone from the color data.
+    """
+    # Landmark indices for sampling points: forehead center, left cheek, right cheek
+    sample_indices = [10, 234, 454]
+    samples = []
+
+    for idx in sample_indices:
+        lm = landmarks[idx]
+        px = int(lm.x * image_width)
+        py = int(lm.y * image_height)
+        # Sample a small 5x5 region around the point, clamped to image bounds
+        x0, x1 = max(0, px - 2), min(image_width, px + 3)
+        y0, y1 = max(0, py - 2), min(image_height, py + 3)
+        region = image_np[y0:y1, x0:x1]
+        if region.size > 0:
+            avg_color = region.reshape(-1, 3).mean(axis=0)
+            samples.append(avg_color)
+
+    if not samples:
+        return {"hex": "#C68863", "undertone": "neutral"}
+
+    avg = np.mean(samples, axis=0)  # [R, G, B]
+    r, g, b = avg[0], avg[1], avg[2]
+
+    hex_color = "#{:02x}{:02x}{:02x}".format(int(r), int(g), int(b))
+
+    # Simple undertone heuristic: compare red/yellow balance vs blue.
+    # Warm: red/yellow dominant. Cool: blue relatively higher. Neutral: balanced.
+    warmth_score = (r + g) - (2 * b)
+    if warmth_score > 30:
+        undertone = "warm"
+    elif warmth_score < 10:
+        undertone = "cool"
+    else:
+        undertone = "neutral"
+
+    return {"hex": hex_color, "undertone": undertone}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "cv-inference-service"}
@@ -143,3 +185,25 @@ async def segment_hair(file: UploadFile = File(...)):
         "width": width,
         "height": height,
     })
+
+
+@app.post("/analyze-skin-tone")
+async def analyze_skin_tone_endpoint(file: UploadFile = File(...)):
+    contents = await file.read()
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    image_np = np.array(image)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_np)
+
+    result = landmarker.detect(mp_image)
+    if not result.face_landmarks:
+        raise HTTPException(status_code=422, detail="No face detected in image")
+
+    landmarks = result.face_landmarks[0]
+    height, width = image_np.shape[0], image_np.shape[1]
+
+    skin_tone = analyze_skin_tone(image_np, landmarks, width, height)
+    return JSONResponse(skin_tone)
