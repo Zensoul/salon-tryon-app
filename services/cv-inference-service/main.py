@@ -33,6 +33,12 @@ segmenter = mp_vision.ImageSegmenter.create_from_options(segmenter_options)
 # Category index 1 = hair, per this model's label map.
 HAIR_CATEGORY_INDEX = 1
 
+# MediaPipe face mesh landmark indices tracing the outer lip boundary.
+OUTER_LIP_INDICES = [
+    61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291,
+    308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 61
+]
+
 
 def classify_face_shape(landmarks, image_width: int, image_height: int) -> str:
     """
@@ -107,9 +113,25 @@ def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) 
     return {"hex": hex_color, "undertone": undertone}
 
 
+def build_lip_mask(landmarks, image_width: int, image_height: int) -> np.ndarray:
+    """
+    Builds a binary lip mask by filling the polygon traced by outer lip
+    landmarks. Uses the same 468-point face mesh we already compute for
+    face-shape detection, so no additional model call is needed.
+    """
+    points = np.array([
+        [int(landmarks[idx].x * image_width), int(landmarks[idx].y * image_height)]
+        for idx in OUTER_LIP_INDICES
+    ], dtype=np.int32)
+
+    mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    cv2.fillPoly(mask, [points], 255)
+    return mask
+
+
 def recolor_hair(image_np, hair_mask, target_hex: str):
     """
-    High-quality hair recoloring:
+    High-quality recoloring (used for both hair and lips):
     - Feathers mask edges (Gaussian blur) for soft, natural transitions
     - Blends in LAB color space (perceptually accurate, separates
       lightness from color better than HSV)
@@ -123,21 +145,16 @@ def recolor_hair(image_np, hair_mask, target_hex: str):
         int(target_hex[4:6], 16),
     ], dtype=np.uint8)
 
-    # Convert target color to LAB
     target_bgr = np.array([[target_rgb[::-1]]], dtype=np.uint8)
     target_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB)[0][0].astype(np.float32)
     target_a, target_b = target_lab[1], target_lab[2]
 
-    # Feather the mask: blur creates a soft 0-255 gradient at edges
-    # instead of a hard binary cutoff.
     feathered = cv2.GaussianBlur(hair_mask, (15, 15), 0)
-    alpha = (feathered.astype(np.float32) / 255.0)[:, :, np.newaxis]  # shape (H, W, 1)
+    alpha = (feathered.astype(np.float32) / 255.0)[:, :, np.newaxis]
 
     image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
     image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # Blend only the a/b (color) channels toward the target; L (lightness)
-    # channel is left completely untouched, preserving all texture/shading.
     l_channel = image_lab[:, :, 0:1]
     a_channel = image_lab[:, :, 1:2]
     b_channel = image_lab[:, :, 2:3]
@@ -264,6 +281,40 @@ async def render_hair_color(file: UploadFile = File(...), target_color: str = "#
     hair_mask = np.where(category_mask == HAIR_CATEGORY_INDEX, 255, 0).astype(np.uint8)
 
     rendered = recolor_hair(image_np, hair_mask, target_color)
+
+    success, encoded = cv2.imencode(".jpg", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to encode rendered image")
+
+    rendered_b64 = base64.b64encode(encoded.tobytes()).decode("utf-8")
+
+    return JSONResponse({
+        "renderedImageBase64": rendered_b64,
+        "format": "jpg",
+    })
+
+
+@app.post("/render-lip-color")
+async def render_lip_color(file: UploadFile = File(...), target_color: str = "#B22222"):
+    contents = await file.read()
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    image_np = np.array(image)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_np)
+
+    result = landmarker.detect(mp_image)
+    if not result.face_landmarks:
+        raise HTTPException(status_code=422, detail="No face detected in image")
+
+    landmarks = result.face_landmarks[0]
+    height, width = image_np.shape[0], image_np.shape[1]
+
+    lip_mask = build_lip_mask(landmarks, width, height)
+
+    rendered = recolor_hair(image_np, lip_mask, target_color)
 
     success, encoded = cv2.imencode(".jpg", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
     if not success:
