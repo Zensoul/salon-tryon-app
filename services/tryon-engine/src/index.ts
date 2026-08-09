@@ -4,9 +4,9 @@ import multipart from "@fastify/multipart";
 import { z } from "zod";
 import { TryOnPipeline } from "./pipeline/orchestrator.js";
 import { RealFaceLandmarkDetector } from "./pipeline/real/faceLandmarkDetector.js";
-import { MockHairSegmenter } from "./pipeline/mock/hairSegmenter.js";
-import { MockSkinToneAnalyzer } from "./pipeline/mock/skinToneAnalyzer.js";
-import { MockStyleRenderer } from "./pipeline/mock/styleRenderer.js";
+import { RealHairSegmenter } from "./pipeline/real/hairSegmenter.js";
+import { RealSkinToneAnalyzer } from "./pipeline/real/skinToneAnalyzer.js";
+import { RealStyleRenderer } from "./pipeline/real/styleRenderer.js";
 import { InMemoryJobStore } from "./jobs/jobStore.js";
 
 const PORT = Number(process.env.PORT ?? 4001);
@@ -16,9 +16,9 @@ await app.register(multipart);
 
 const pipeline = new TryOnPipeline({
   faceLandmarkDetector: new RealFaceLandmarkDetector(),
-  hairSegmenter: new MockHairSegmenter(),
-  skinToneAnalyzer: new MockSkinToneAnalyzer(),
-  styleRenderer: new MockStyleRenderer(),
+  hairSegmenter: new RealHairSegmenter(),
+  skinToneAnalyzer: new RealSkinToneAnalyzer(),
+  styleRenderer: new RealStyleRenderer(),
 });
 
 const jobStore = new InMemoryJobStore();
