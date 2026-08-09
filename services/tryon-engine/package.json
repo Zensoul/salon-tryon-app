@@ -13,7 +13,8 @@
     "fastify": "4.28.1",
     "@fastify/multipart": "8.3.0",
     "pino": "^9.4.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",

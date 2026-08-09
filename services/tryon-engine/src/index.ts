@@ -1,8 +1,9 @@
+import "dotenv/config";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import { z } from "zod";
 import { TryOnPipeline } from "./pipeline/orchestrator.js";
-import { MockFaceLandmarkDetector } from "./pipeline/mock/faceLandmarkDetector.js";
+import { RealFaceLandmarkDetector } from "./pipeline/real/faceLandmarkDetector.js";
 import { MockHairSegmenter } from "./pipeline/mock/hairSegmenter.js";
 import { MockSkinToneAnalyzer } from "./pipeline/mock/skinToneAnalyzer.js";
 import { MockStyleRenderer } from "./pipeline/mock/styleRenderer.js";
@@ -14,7 +15,7 @@ const app = Fastify({ logger: true });
 await app.register(multipart);
 
 const pipeline = new TryOnPipeline({
-  faceLandmarkDetector: new MockFaceLandmarkDetector(),
+  faceLandmarkDetector: new RealFaceLandmarkDetector(),
   hairSegmenter: new MockHairSegmenter(),
   skinToneAnalyzer: new MockSkinToneAnalyzer(),
   styleRenderer: new MockStyleRenderer(),
