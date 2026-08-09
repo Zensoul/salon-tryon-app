@@ -3,6 +3,7 @@ import TelegramBot from "node-telegram-bot-api";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { HAIR_COLOR_OPTIONS } from "./styles.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -32,7 +33,7 @@ bot.onText(/\/start/, (msg) => {
   sessions.set(chatId, { sessionId: randomUUID() });
   bot.sendMessage(
     chatId,
-    "Welcome! Send me a selfie and I'll show you how different hair colors and lip colors would look on you."
+    "Welcome! Send me a selfie and I'll show you how different hair colors would look on you."
   );
 });
 
@@ -48,6 +49,7 @@ async function pollJobUntilDone(jobId: string, maxAttempts = 10): Promise<any> {
   throw new Error("Job did not complete in time");
 }
 
+// Step 1: receive selfie, save it, show color picker buttons.
 bot.on("photo", async (msg) => {
   const chatId = msg.chat.id;
   const photos = msg.photo;
@@ -69,51 +71,86 @@ bot.on("photo", async (msg) => {
     sessions.set(chatId, session);
 
     console.log(`Saved selfie for session ${session.sessionId} -> ${filePath}`);
-    bot.sendMessage(chatId, "Got your selfie! Rendering a copper hair color preview now...");
 
+    const keyboard = {
+      inline_keyboard: chunk(
+        HAIR_COLOR_OPTIONS.map((opt) => ({
+          text: opt.label,
+          callback_data: `haircolor:${opt.id}`,
+        })),
+        2
+      ),
+    };
+
+    bot.sendMessage(chatId, "Got your selfie! Pick a hair color to try on:", {
+      reply_markup: keyboard,
+    });
+  } catch (err) {
+    console.error("Failed to save selfie:", err);
+    bot.sendMessage(chatId, "Sorry, something went wrong. Please try again.");
+  }
+});
+
+// Step 2: handle color button press, run the try-on, send result photo.
+bot.on("callback_query", async (query) => {
+  const chatId = query.message?.chat.id;
+  if (!chatId || !query.data?.startsWith("haircolor:")) return;
+
+  const colorId = query.data.replace("haircolor:", "");
+  const colorOption = HAIR_COLOR_OPTIONS.find((opt) => opt.id === colorId);
+  if (!colorOption) return;
+
+  const session = sessions.get(chatId);
+  if (!session?.selfiePath) {
+    bot.answerCallbackQuery(query.id, { text: "Please send a selfie first." });
+    return;
+  }
+
+  bot.answerCallbackQuery(query.id, { text: `Rendering ${colorOption.label}...` });
+  bot.sendMessage(chatId, `Rendering ${colorOption.label}, one moment...`);
+
+  try {
     const submitRes = await fetch(`${API_GATEWAY_URL}/tryon`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: session.sessionId,
-        sourceImagePath: filePath,
+        sourceImagePath: session.selfiePath,
         style: {
-          styleId: "hair_color_copper",
+          styleId: `hair_color_${colorOption.id}`,
           category: "hair_color",
-          targetColor: "#B87333",
+          targetColor: colorOption.hex,
         },
       }),
     });
     const submitData = await submitRes.json();
-    console.log("Submitted job:", submitData);
-
     const result = await pollJobUntilDone(submitData.jobId);
-    console.log("Job result status:", result.status);
 
     if (result.status === "completed") {
       const renderedImagePath = result.result.render.outputImagePath;
-
-      // Only send as photo if it's an actual rendered file (different from
-      // the source selfie) — otherwise category wasn't hair_color and we
-      // fall back to a text summary.
-      if (renderedImagePath !== filePath && fs.existsSync(renderedImagePath)) {
+      if (renderedImagePath !== session.selfiePath && fs.existsSync(renderedImagePath)) {
         await bot.sendPhoto(chatId, renderedImagePath, {
-          caption: `Here's your copper hair color try-on!\n\nDetected face shape: ${result.result.landmarks.faceShape}\nYour undertone: ${result.result.skinTone.undertone}`,
+          caption: `${colorOption.label} — here's your try-on!`,
         });
       } else {
-        bot.sendMessage(
-          chatId,
-          `Try-on complete!\n\nDetected face shape: ${result.result.landmarks.faceShape}\nEstimated undertone: ${result.result.skinTone.undertone}`
-        );
+        bot.sendMessage(chatId, "Try-on completed but rendering failed. Please try again.");
       }
     } else {
       bot.sendMessage(chatId, "Sorry, the try-on failed. Please try again.");
     }
   } catch (err) {
-    console.error("Failed to process selfie:", err);
+    console.error("Failed to process color try-on:", err);
     bot.sendMessage(chatId, "Sorry, something went wrong. Please try again.");
   }
 });
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
+}
 
 bot.on("message", (msg) => {
   if (msg.photo) return;
