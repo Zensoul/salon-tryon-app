@@ -41,7 +41,6 @@ def classify_face_shape(landmarks, image_width: int, image_height: int) -> str:
     have labeled data, but this gives genuinely reasonable results using
     actual measured geometry (not random, unlike the mock).
     """
-    # Key landmark indices (MediaPipe 468-point face mesh)
     top = landmarks[10]      # forehead top
     bottom = landmarks[152]  # chin bottom
     left = landmarks[234]    # left cheek
@@ -75,7 +74,6 @@ def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) 
     Samples actual pixel colors from forehead and cheek regions (using
     real landmark positions) and estimates undertone from the color data.
     """
-    # Landmark indices for sampling points: forehead center, left cheek, right cheek
     sample_indices = [10, 234, 454]
     samples = []
 
@@ -83,7 +81,6 @@ def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) 
         lm = landmarks[idx]
         px = int(lm.x * image_width)
         py = int(lm.y * image_height)
-        # Sample a small 5x5 region around the point, clamped to image bounds
         x0, x1 = max(0, px - 2), min(image_width, px + 3)
         y0, y1 = max(0, py - 2), min(image_height, py + 3)
         region = image_np[y0:y1, x0:x1]
@@ -94,13 +91,11 @@ def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) 
     if not samples:
         return {"hex": "#C68863", "undertone": "neutral"}
 
-    avg = np.mean(samples, axis=0)  # [R, G, B]
+    avg = np.mean(samples, axis=0)
     r, g, b = avg[0], avg[1], avg[2]
 
     hex_color = "#{:02x}{:02x}{:02x}".format(int(r), int(g), int(b))
 
-    # Simple undertone heuristic: compare red/yellow balance vs blue.
-    # Warm: red/yellow dominant. Cool: blue relatively higher. Neutral: balanced.
     warmth_score = (r + g) - (2 * b)
     if warmth_score > 30:
         undertone = "warm"
@@ -110,6 +105,40 @@ def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) 
         undertone = "neutral"
 
     return {"hex": hex_color, "undertone": undertone}
+
+
+def recolor_hair(image_np, hair_mask, target_hex: str):
+    """
+    Recolors hair pixels toward target_hex while preserving the original
+    lightness/shading (so texture and highlights remain visible), using
+    HSV color space blending rather than a flat overlay.
+    """
+    target_hex = target_hex.lstrip("#")
+    target_rgb = np.array([
+        int(target_hex[0:2], 16),
+        int(target_hex[2:4], 16),
+        int(target_hex[4:6], 16),
+    ], dtype=np.uint8)
+
+    target_bgr = np.array([[target_rgb[::-1]]], dtype=np.uint8)
+    target_hsv = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2HSV)[0][0]
+    target_h, target_s = target_hsv[0], target_hsv[1]
+
+    image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    image_hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.int32)
+
+    mask_bool = hair_mask > 0
+
+    # Replace hue and saturation with the target color's, but KEEP the
+    # original value (brightness) channel — this preserves shading/texture.
+    image_hsv[mask_bool, 0] = target_h
+    image_hsv[mask_bool, 1] = target_s
+
+    image_hsv = np.clip(image_hsv, 0, 255).astype(np.uint8)
+    result_bgr = cv2.cvtColor(image_hsv, cv2.COLOR_HSV2BGR)
+    result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+
+    return result_rgb
 
 
 @app.get("/health")
@@ -168,11 +197,8 @@ async def segment_hair(file: UploadFile = File(...)):
     result = segmenter.segment(mp_image)
     category_mask = result.category_mask.numpy_view()
 
-    # Build a binary mask: 255 where hair is detected, 0 elsewhere.
     hair_mask = np.where(category_mask == HAIR_CATEGORY_INDEX, 255, 0).astype(np.uint8)
 
-    # Encode as PNG and return as base64 so tryon-engine can save/use it
-    # without a shared filesystem between services.
     success, encoded = cv2.imencode(".png", hair_mask)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to encode hair mask")
@@ -207,3 +233,32 @@ async def analyze_skin_tone_endpoint(file: UploadFile = File(...)):
 
     skin_tone = analyze_skin_tone(image_np, landmarks, width, height)
     return JSONResponse(skin_tone)
+
+
+@app.post("/render-hair-color")
+async def render_hair_color(file: UploadFile = File(...), target_color: str = "#B87333"):
+    contents = await file.read()
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    image_np = np.array(image)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_np)
+
+    result = segmenter.segment(mp_image)
+    category_mask = result.category_mask.numpy_view()
+    hair_mask = np.where(category_mask == HAIR_CATEGORY_INDEX, 255, 0).astype(np.uint8)
+
+    rendered = recolor_hair(image_np, hair_mask, target_color)
+
+    success, encoded = cv2.imencode(".jpg", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to encode rendered image")
+
+    rendered_b64 = base64.b64encode(encoded.tobytes()).decode("utf-8")
+
+    return JSONResponse({
+        "renderedImageBase64": rendered_b64,
+        "format": "jpg",
+    })
