@@ -1,8 +1,11 @@
 import io
+import base64
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
+from mediapipe.tasks.python import vision as mp_vision
 import numpy as np
+import cv2
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -18,6 +21,17 @@ options = vision.FaceLandmarkerOptions(
     num_faces=1,
 )
 landmarker = vision.FaceLandmarker.create_from_options(options)
+
+# Multiclass segmenter: identifies hair, face-skin, body-skin, clothes,
+# and background as separate categories in one pass.
+segmenter_options = mp_vision.ImageSegmenterOptions(
+    base_options=mp_python.BaseOptions(model_asset_path="models/selfie_multiclass.tflite"),
+    output_category_mask=True,
+)
+segmenter = mp_vision.ImageSegmenter.create_from_options(segmenter_options)
+
+# Category index 1 = hair, per this model's label map.
+HAIR_CATEGORY_INDEX = 1
 
 
 def classify_face_shape(landmarks, image_width: int, image_height: int) -> str:
@@ -95,4 +109,37 @@ async def detect_landmarks(file: UploadFile = File(...)):
         "points": [{"x": lm.x, "y": lm.y} for lm in landmarks],
         "boundingBox": bounding_box,
         "faceShape": face_shape,
+    })
+
+
+@app.post("/segment-hair")
+async def segment_hair(file: UploadFile = File(...)):
+    contents = await file.read()
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    image_np = np.array(image)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_np)
+
+    result = segmenter.segment(mp_image)
+    category_mask = result.category_mask.numpy_view()
+
+    # Build a binary mask: 255 where hair is detected, 0 elsewhere.
+    hair_mask = np.where(category_mask == HAIR_CATEGORY_INDEX, 255, 0).astype(np.uint8)
+
+    # Encode as PNG and return as base64 so tryon-engine can save/use it
+    # without a shared filesystem between services.
+    success, encoded = cv2.imencode(".png", hair_mask)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to encode hair mask")
+
+    mask_b64 = base64.b64encode(encoded.tobytes()).decode("utf-8")
+
+    height, width = hair_mask.shape
+    return JSONResponse({
+        "maskBase64": mask_b64,
+        "width": width,
+        "height": height,
     })
