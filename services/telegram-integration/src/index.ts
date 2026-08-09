@@ -69,9 +69,8 @@ bot.on("photo", async (msg) => {
     sessions.set(chatId, session);
 
     console.log(`Saved selfie for session ${session.sessionId} -> ${filePath}`);
-    bot.sendMessage(chatId, "Got your selfie! Processing a try-on preview now...");
+    bot.sendMessage(chatId, "Got your selfie! Rendering a copper hair color preview now...");
 
-    // Default test style for now — real style picker (buttons) comes next.
     const submitRes = await fetch(`${API_GATEWAY_URL}/tryon`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -89,13 +88,24 @@ bot.on("photo", async (msg) => {
     console.log("Submitted job:", submitData);
 
     const result = await pollJobUntilDone(submitData.jobId);
-    console.log("Job result:", result);
+    console.log("Job result status:", result.status);
 
     if (result.status === "completed") {
-      bot.sendMessage(
-        chatId,
-        `Try-on complete! (This is using placeholder AI data for now — real rendering comes next.)\n\nDetected face shape: ${result.result.landmarks.faceShape}\nEstimated undertone: ${result.result.skinTone.undertone}`
-      );
+      const renderedImagePath = result.result.render.outputImagePath;
+
+      // Only send as photo if it's an actual rendered file (different from
+      // the source selfie) — otherwise category wasn't hair_color and we
+      // fall back to a text summary.
+      if (renderedImagePath !== filePath && fs.existsSync(renderedImagePath)) {
+        await bot.sendPhoto(chatId, renderedImagePath, {
+          caption: `Here's your copper hair color try-on!\n\nDetected face shape: ${result.result.landmarks.faceShape}\nYour undertone: ${result.result.skinTone.undertone}`,
+        });
+      } else {
+        bot.sendMessage(
+          chatId,
+          `Try-on complete!\n\nDetected face shape: ${result.result.landmarks.faceShape}\nEstimated undertone: ${result.result.skinTone.undertone}`
+        );
+      }
     } else {
       bot.sendMessage(chatId, "Sorry, the try-on failed. Please try again.");
     }

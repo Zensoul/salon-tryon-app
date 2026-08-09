@@ -109,9 +109,12 @@ def analyze_skin_tone(image_np, landmarks, image_width: int, image_height: int) 
 
 def recolor_hair(image_np, hair_mask, target_hex: str):
     """
-    Recolors hair pixels toward target_hex while preserving the original
-    lightness/shading (so texture and highlights remain visible), using
-    HSV color space blending rather than a flat overlay.
+    High-quality hair recoloring:
+    - Feathers mask edges (Gaussian blur) for soft, natural transitions
+    - Blends in LAB color space (perceptually accurate, separates
+      lightness from color better than HSV)
+    - Alpha-weighted blend preserves original luminance/texture entirely
+      while shifting color proportionally at the edges
     """
     target_hex = target_hex.lstrip("#")
     target_rgb = np.array([
@@ -120,22 +123,32 @@ def recolor_hair(image_np, hair_mask, target_hex: str):
         int(target_hex[4:6], 16),
     ], dtype=np.uint8)
 
+    # Convert target color to LAB
     target_bgr = np.array([[target_rgb[::-1]]], dtype=np.uint8)
-    target_hsv = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2HSV)[0][0]
-    target_h, target_s = target_hsv[0], target_hsv[1]
+    target_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB)[0][0].astype(np.float32)
+    target_a, target_b = target_lab[1], target_lab[2]
+
+    # Feather the mask: blur creates a soft 0-255 gradient at edges
+    # instead of a hard binary cutoff.
+    feathered = cv2.GaussianBlur(hair_mask, (15, 15), 0)
+    alpha = (feathered.astype(np.float32) / 255.0)[:, :, np.newaxis]  # shape (H, W, 1)
 
     image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-    image_hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.int32)
+    image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    mask_bool = hair_mask > 0
+    # Blend only the a/b (color) channels toward the target; L (lightness)
+    # channel is left completely untouched, preserving all texture/shading.
+    l_channel = image_lab[:, :, 0:1]
+    a_channel = image_lab[:, :, 1:2]
+    b_channel = image_lab[:, :, 2:3]
 
-    # Replace hue and saturation with the target color's, but KEEP the
-    # original value (brightness) channel — this preserves shading/texture.
-    image_hsv[mask_bool, 0] = target_h
-    image_hsv[mask_bool, 1] = target_s
+    blended_a = a_channel * (1 - alpha) + target_a * alpha
+    blended_b = b_channel * (1 - alpha) + target_b * alpha
 
-    image_hsv = np.clip(image_hsv, 0, 255).astype(np.uint8)
-    result_bgr = cv2.cvtColor(image_hsv, cv2.COLOR_HSV2BGR)
+    result_lab = np.concatenate([l_channel, blended_a, blended_b], axis=2)
+    result_lab = np.clip(result_lab, 0, 255).astype(np.uint8)
+
+    result_bgr = cv2.cvtColor(result_lab, cv2.COLOR_LAB2BGR)
     result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
     return result_rgb
